@@ -132,10 +132,11 @@ class SentenceTransformersDocumentEmbedder:
             normalize_embeddings=self.normalize_embeddings,
         )
 
-        documents_with_embeddings = []
+        # documents_with_embeddings = []
         for doc, emb in zip(documents, embeddings):
-            doc_as_dict = doc.to_dict()
-            doc_as_dict["embedding"] = emb
-            documents_with_embeddings.append(Document.from_dict(doc_as_dict))
+            doc.embedding = emb
+            # doc_as_dict = doc.to_dict()
+            # doc_as_dict["embedding"] = emb
+            # documents_with_embeddings.append(Document.from_dict(doc_as_dict))
 
-        return {"documents": documents_with_embeddings}
+        return {"documents": documents}
