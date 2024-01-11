@@ -1,10 +1,14 @@
+import copy
 import dataclasses
+import json
 import logging
-import os
-from typing import Optional, List, Callable, Dict, Any
+import warnings
+from typing import Optional, List, Callable, Dict, Any, Union
 
-import openai
-from openai.openai_object import OpenAIObject
+from openai import OpenAI, Stream  # type: ignore
+from openai.types.chat import ChatCompletionChunk, ChatCompletion, ChatCompletionMessage
+from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice
 
 from haystack import component, default_from_dict, default_to_dict
 from haystack.components.generators.utils import serialize_callback_handler, deserialize_callback_handler
@@ -13,11 +17,8 @@ from haystack.dataclasses import StreamingChunk, ChatMessage
 logger = logging.getLogger(__name__)
 
 
-API_BASE_URL = "https://api.openai.com/v1"
-
-
 @component
-class GPTChatGenerator:
+class OpenAIChatGenerator:
     """
     Enables text generation using OpenAI's large language models (LLMs). It supports gpt-4 and gpt-3.5-turbo
     family of models accessed through the chat completions API endpoint.
@@ -30,19 +31,19 @@ class GPTChatGenerator:
     [documentation](https://platform.openai.com/docs/api-reference/chat).
 
     ```python
-    from haystack.components.generators.chat import GPTChatGenerator
+    from haystack.components.generators.chat import OpenAIChatGenerator
     from haystack.dataclasses import ChatMessage
 
     messages = [ChatMessage.from_user("What's Natural Language Processing?")]
 
-    client = GPTChatGenerator()
+    client = OpenAIChatGenerator()
     response = client.run(messages)
     print(response)
 
     >>{'replies': [ChatMessage(content='Natural Language Processing (NLP) is a branch of artificial intelligence
     >>that focuses on enabling computers to understand, interpret, and generate human language in a way that is
     >>meaningful and useful.', role=<ChatRole.ASSISTANT: 'assistant'>, name=None,
-    >>metadata={'model': 'gpt-3.5-turbo-0613', 'index': 0, 'finish_reason': 'stop',
+    >>meta={'model': 'gpt-3.5-turbo-0613', 'index': 0, 'finish_reason': 'stop',
     >>'usage': {'prompt_tokens': 15, 'completion_tokens': 36, 'total_tokens': 51}})]}
 
     ```
@@ -64,11 +65,12 @@ class GPTChatGenerator:
         api_key: Optional[str] = None,
         model_name: str = "gpt-3.5-turbo",
         streaming_callback: Optional[Callable[[StreamingChunk], None]] = None,
-        api_base_url: str = API_BASE_URL,
+        api_base_url: Optional[str] = None,
+        organization: Optional[str] = None,
         generation_kwargs: Optional[Dict[str, Any]] = None,
     ):
         """
-        Creates an instance of ChatGPTGenerator. Unless specified otherwise in the `model_name`, this is for OpenAI's
+        Creates an instance of OpenAIChatGenerator. Unless specified otherwise in the `model_name`, this is for OpenAI's
         GPT-3.5 model.
 
         :param api_key: The OpenAI API key. It can be explicitly provided or automatically read from the
@@ -76,7 +78,9 @@ class GPTChatGenerator:
         :param model_name: The name of the model to use.
         :param streaming_callback: A callback function that is called when a new token is received from the stream.
             The callback function accepts StreamingChunk as an argument.
-        :param api_base_url: The OpenAI API Base url, defaults to `https://api.openai.com/v1`.
+        :param api_base_url: An optional base URL.
+        :param organization: The Organization ID, defaults to `None`. See
+        [production best practices](https://platform.openai.com/docs/guides/production-best-practices/setting-up-your-organization).
         :param generation_kwargs: Other parameters to use for the model. These parameters are all sent directly to
             the OpenAI endpoint. See OpenAI [documentation](https://platform.openai.com/docs/api-reference/chat) for
             more details.
@@ -97,24 +101,12 @@ class GPTChatGenerator:
             - `logit_bias`: Add a logit bias to specific tokens. The keys of the dictionary are tokens, and the
                 values are the bias to add to that token.
         """
-        # if the user does not provide the API key, check if it is set in the module client
-        api_key = api_key or openai.api_key
-        if api_key is None:
-            try:
-                api_key = os.environ["OPENAI_API_KEY"]
-            except KeyError as e:
-                raise ValueError(
-                    "GPTChatGenerator expects an OpenAI API key. "
-                    "Set the OPENAI_API_KEY environment variable (recommended) or pass it explicitly."
-                ) from e
-        openai.api_key = api_key
-
         self.model_name = model_name
         self.generation_kwargs = generation_kwargs or {}
         self.streaming_callback = streaming_callback
-
         self.api_base_url = api_base_url
-        openai.api_base = api_base_url
+        self.organization = organization
+        self.client = OpenAI(api_key=api_key, organization=organization, base_url=api_base_url)
 
     def _get_telemetry_data(self) -> Dict[str, Any]:
         """
@@ -133,11 +125,12 @@ class GPTChatGenerator:
             model_name=self.model_name,
             streaming_callback=callback_name,
             api_base_url=self.api_base_url,
+            organization=self.organization,
             generation_kwargs=self.generation_kwargs,
         )
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "GPTChatGenerator":
+    def from_dict(cls, data: Dict[str, Any]) -> "OpenAIChatGenerator":
         """
         Deserialize this component from a dictionary.
         :param data: The dictionary representation of this component.
@@ -168,28 +161,32 @@ class GPTChatGenerator:
         # adapt ChatMessage(s) to the format expected by the OpenAI API
         openai_formatted_messages = self._convert_to_openai_format(messages)
 
-        completion = openai.ChatCompletion.create(
+        chat_completion: Union[Stream[ChatCompletionChunk], ChatCompletion] = self.client.chat.completions.create(
             model=self.model_name,
-            messages=openai_formatted_messages,
+            messages=openai_formatted_messages,  # type: ignore # openai expects list of specific message types
             stream=self.streaming_callback is not None,
             **generation_kwargs,
         )
 
-        completions: List[ChatMessage]
-        if self.streaming_callback:
+        completions: List[ChatMessage] = []
+        # if streaming is enabled, the completion is a Stream of ChatCompletionChunk
+        if isinstance(chat_completion, Stream):
             num_responses = generation_kwargs.pop("n", 1)
             if num_responses > 1:
                 raise ValueError("Cannot stream multiple responses, please set n=1.")
             chunks: List[StreamingChunk] = []
             chunk = None
-            for chunk in completion:
-                if chunk.choices:
-                    chunk_delta: StreamingChunk = self._build_chunk(chunk, chunk.choices[0])
+
+            # pylint: disable=not-an-iterable
+            for chunk in chat_completion:
+                if chunk.choices and self.streaming_callback:
+                    chunk_delta: StreamingChunk = self._build_chunk(chunk)
                     chunks.append(chunk_delta)
                     self.streaming_callback(chunk_delta)  # invoke callback with the chunk_delta
             completions = [self._connect_chunks(chunk, chunks)]
-        else:
-            completions = [self._build_message(completion, choice) for choice in completion.choices]
+        # if streaming is disabled, the completion is a ChatCompletion
+        elif isinstance(chat_completion, ChatCompletion):
+            completions = [self._build_message(chat_completion, choice) for choice in chat_completion.choices]
 
         # before returning, do post-processing of the completions
         for message in completions:
@@ -211,14 +208,47 @@ class GPTChatGenerator:
             openai_formatted_messages.append(filtered_message)
         return openai_formatted_messages
 
-    def _connect_chunks(self, chunk: OpenAIObject, chunks: List[StreamingChunk]) -> ChatMessage:
+    def _connect_chunks(self, chunk: Any, chunks: List[StreamingChunk]) -> ChatMessage:
         """
         Connects the streaming chunks into a single ChatMessage.
         :param chunk: The last chunk returned by the OpenAI API.
         :param chunks: The list of all chunks returned by the OpenAI API.
         """
-        complete_response = ChatMessage.from_assistant("".join([chunk.content for chunk in chunks]))
-        complete_response.metadata.update(
+        is_tools_call = bool(chunks[0].meta.get("tool_calls"))
+        is_function_call = bool(chunks[0].meta.get("function_call"))
+        # if it's a tool call or function call, we need to build the payload dict from all the chunks
+        if is_tools_call or is_function_call:
+            tools_len = 1 if is_function_call else len(chunks[0].meta.get("tool_calls", []))
+            # don't change this approach of building payload dicts, otherwise mypy will complain
+            p_def: Dict[str, Any] = {
+                "index": 0,
+                "id": "",
+                "function": {"arguments": "", "name": ""},
+                "type": "function",
+            }
+            payloads = [copy.deepcopy(p_def) for _ in range(tools_len)]
+            for chunk_payload in chunks:
+                if is_tools_call:
+                    deltas = chunk_payload.meta.get("tool_calls") or []
+                else:
+                    deltas = [chunk_payload.meta["function_call"]] if chunk_payload.meta.get("function_call") else []
+
+                # deltas is a list of ChoiceDeltaToolCall or ChoiceDeltaFunctionCall
+                for i, delta in enumerate(deltas):
+                    payload = payloads[i]
+                    if is_tools_call:
+                        payload["id"] = delta.id or payload["id"]
+                        payload["type"] = delta.type or payload["type"]
+                        if delta.function:
+                            payload["function"]["name"] += delta.function.name or ""
+                            payload["function"]["arguments"] += delta.function.arguments or ""
+                    elif is_function_call:
+                        payload["function"]["name"] += delta.name or ""
+                        payload["function"]["arguments"] += delta.arguments or ""
+            complete_response = ChatMessage.from_assistant(json.dumps(payloads))
+        else:
+            complete_response = ChatMessage.from_assistant("".join([chunk.content for chunk in chunks]))
+        complete_response.meta.update(
             {
                 "model": chunk.model,
                 "index": 0,
@@ -228,44 +258,58 @@ class GPTChatGenerator:
         )
         return complete_response
 
-    def _build_message(self, completion: OpenAIObject, choice: OpenAIObject) -> ChatMessage:
+    def _build_message(self, completion: ChatCompletion, choice: Choice) -> ChatMessage:
         """
         Converts the non-streaming response from the OpenAI API to a ChatMessage.
         :param completion: The completion returned by the OpenAI API.
         :param choice: The choice returned by the OpenAI API.
         :return: The ChatMessage.
         """
-        message: OpenAIObject = choice.message
-        # message.content is str but message.function_call is OpenAIObject but JSON in fact, convert to str
-        content = str(message.function_call) if choice.finish_reason == "function_call" else message.content
+        message: ChatCompletionMessage = choice.message
+        content = message.content or ""
+        if message.function_call:
+            # here we mimic the tools format response so that if user passes deprecated `functions` parameter
+            # she'll get the same output as if new `tools` parameter was passed
+            # use pydantic model dump to serialize the function call
+            content = json.dumps(
+                [{"function": message.function_call.model_dump(), "type": "function", "id": completion.id}]
+            )
+        elif message.tool_calls:
+            # new `tools` parameter was passed, use pydantic model dump to serialize the tool calls
+            content = json.dumps([tc.model_dump() for tc in message.tool_calls])
+
         chat_message = ChatMessage.from_assistant(content)
-        chat_message.metadata.update(
+        chat_message.meta.update(
             {
                 "model": completion.model,
                 "index": choice.index,
                 "finish_reason": choice.finish_reason,
-                "usage": dict(completion.usage.items()),
+                "usage": dict(completion.usage or {}),
             }
         )
         return chat_message
 
-    def _build_chunk(self, chunk: OpenAIObject, choice: OpenAIObject) -> StreamingChunk:
+    def _build_chunk(self, chunk: ChatCompletionChunk) -> StreamingChunk:
         """
         Converts the streaming response chunk from the OpenAI API to a StreamingChunk.
         :param chunk: The chunk returned by the OpenAI API.
         :param choice: The choice returned by the OpenAI API.
         :return: The StreamingChunk.
         """
-        has_content = bool(hasattr(choice.delta, "content") and choice.delta.content)
-        if has_content:
-            content = choice.delta.content
-        elif hasattr(choice.delta, "function_call"):
-            content = choice.delta.function_call
-        else:
-            content = ""
+        # we stream the content of the chunk if it's not a tool or function call
+        choice: ChunkChoice = chunk.choices[0]
+        content = choice.delta.content or ""
         chunk_message = StreamingChunk(content)
-        chunk_message.metadata.update(
-            {"model": chunk.model, "index": choice.index, "finish_reason": choice.finish_reason}
+        # but save the tool calls and function call in the meta if they are present
+        # and then connect the chunks in the _connect_chunks method
+        chunk_message.meta.update(
+            {
+                "model": chunk.model,
+                "index": choice.index,
+                "tool_calls": choice.delta.tool_calls,
+                "function_call": choice.delta.function_call,
+                "finish_reason": choice.finish_reason,
+            }
         )
         return chunk_message
 
@@ -275,13 +319,39 @@ class GPTChatGenerator:
         If the `finish_reason` is `length` or `content_filter`, log a warning.
         :param message: The message returned by the LLM.
         """
-        if message.metadata["finish_reason"] == "length":
+        if message.meta["finish_reason"] == "length":
             logger.warning(
                 "The completion for index %s has been truncated before reaching a natural stopping point. "
                 "Increase the max_tokens parameter to allow for longer completions.",
-                message.metadata["index"],
+                message.meta["index"],
             )
-        if message.metadata["finish_reason"] == "content_filter":
+        if message.meta["finish_reason"] == "content_filter":
             logger.warning(
-                "The completion for index %s has been truncated due to the content filter.", message.metadata["index"]
+                "The completion for index %s has been truncated due to the content filter.", message.meta["index"]
             )
+
+
+class GPTChatGenerator(OpenAIChatGenerator):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: str = "gpt-3.5-turbo",
+        streaming_callback: Optional[Callable[[StreamingChunk], None]] = None,
+        api_base_url: Optional[str] = None,
+        organization: Optional[str] = None,
+        generation_kwargs: Optional[Dict[str, Any]] = None,
+    ):
+        warnings.warn(
+            "GPTChatGenerator is deprecated and will be removed in the next beta release. "
+            "Please use OpenAIChatGenerator instead.",
+            UserWarning,
+            stacklevel=2,
+        )
+        super().__init__(
+            api_key=api_key,
+            model_name=model_name,
+            streaming_callback=streaming_callback,
+            api_base_url=api_base_url,
+            organization=organization,
+            generation_kwargs=generation_kwargs,
+        )

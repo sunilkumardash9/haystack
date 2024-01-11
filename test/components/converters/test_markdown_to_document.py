@@ -1,19 +1,19 @@
 import logging
 
+from unittest.mock import patch
 import pytest
 
 from haystack.components.converters.markdown import MarkdownToDocument
 from haystack.dataclasses import ByteStream
 
 
+@pytest.mark.integration
 class TestMarkdownToDocument:
-    @pytest.mark.unit
     def test_init_params_default(self):
         converter = MarkdownToDocument()
         assert converter.table_to_single_line is False
         assert converter.progress_bar is True
 
-    @pytest.mark.unit
     def test_init_params_custom(self):
         converter = MarkdownToDocument(table_to_single_line=True, progress_bar=False)
         assert converter.table_to_single_line is True
@@ -31,19 +31,33 @@ class TestMarkdownToDocument:
             assert "What to build with Haystack" in doc.content
             assert "# git clone https://github.com/deepset-ai/haystack.git" in doc.content
 
-    @pytest.mark.integration
-    def test_run_metadata(self, test_files_path):
-        converter = MarkdownToDocument()
-        sources = [test_files_path / "markdown" / "sample.md"]
-        metadata = [{"file_name": "sample.md"}]
-        results = converter.run(sources=sources, meta=metadata)
-        docs = results["documents"]
+    def test_run_calls_normalize_metadata(self, test_files_path):
+        bytestream = ByteStream(data=b"test", meta={"author": "test_author", "language": "en"})
 
-        assert len(docs) == 1
-        for doc in docs:
-            assert "What to build with Haystack" in doc.content
-            assert "# git clone https://github.com/deepset-ai/haystack.git" in doc.content
-            assert doc.meta == {"file_name": "sample.md"}
+        converter = MarkdownToDocument()
+
+        with patch("haystack.components.converters.markdown.normalize_metadata") as normalize_metadata, patch(
+            "haystack.components.converters.markdown.MarkdownIt"
+        ):
+            converter.run(sources=[bytestream, test_files_path / "markdown" / "sample.md"], meta={"language": "it"})
+
+        # check that the metadata normalizer is called properly
+        normalize_metadata.assert_called_with(meta={"language": "it"}, sources_count=2)
+
+    def test_run_with_meta(self, test_files_path):
+        bytestream = ByteStream(data=b"test", meta={"author": "test_author", "language": "en"})
+
+        converter = MarkdownToDocument()
+
+        with patch("haystack.components.converters.markdown.MarkdownIt"):
+            output = converter.run(
+                sources=[bytestream, test_files_path / "markdown" / "sample.md"], meta={"language": "it"}
+            )
+
+        # check that the metadata from the bytestream is merged with that from the meta parameter
+        assert output["documents"][0].meta["author"] == "test_author"
+        assert output["documents"][0].meta["language"] == "it"
+        assert output["documents"][1].meta["language"] == "it"
 
     @pytest.mark.integration
     def test_run_wrong_file_type(self, test_files_path, caplog):
@@ -71,7 +85,6 @@ class TestMarkdownToDocument:
             assert "Could not read non_existing_file.md" in caplog.text
             assert not result["documents"]
 
-    @pytest.mark.unit
     def test_mixed_sources_run(self, test_files_path):
         """
         Test if the component runs correctly if the input is a mix of strings, paths and ByteStreams.

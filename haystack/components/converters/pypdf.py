@@ -1,11 +1,12 @@
 import io
 import logging
-from typing import List, Union, Protocol, Dict
+from typing import List, Union, Protocol, Dict, Any, Optional
 from pathlib import Path
 
 from haystack.dataclasses import ByteStream
 from haystack.lazy_imports import LazyImport
 from haystack import Document, component, default_to_dict
+from haystack.components.converters.utils import get_bytestream_from_source, normalize_metadata
 
 with LazyImport("Run 'pip install pypdf'") as pypdf_import:
     from pypdf import PdfReader
@@ -45,6 +46,17 @@ class PyPDFToDocument:
     Converts PDF files to Document objects.
     It uses a converter that follows the PyPDFConverter protocol to perform the conversion.
     A default text extraction converter is used if no custom converter is provided.
+
+    Usage example:
+    ```python
+    from haystack.components.converters.pypdf import PyPDFToDocument
+
+    converter = PyPDFToDocument()
+    results = converter.run(sources=["sample.pdf"], meta={"date_added": datetime.now().isoformat()})
+    documents = results["documents"]
+    print(documents[0].content)
+    # 'This is a text from the PDF file.'
+    ```
     """
 
     def __init__(self, converter_name: str = "default"):
@@ -70,36 +82,40 @@ class PyPDFToDocument:
         return default_to_dict(self, converter_name=self.converter_name)
 
     @component.output_types(documents=List[Document])
-    def run(self, sources: List[Union[str, Path, ByteStream]]):
+    def run(
+        self,
+        sources: List[Union[str, Path, ByteStream]],
+        meta: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
+    ):
         """
         Converts a list of PDF sources into Document objects using the configured converter.
 
         :param sources: A list of PDF data sources, which can be file paths or ByteStream objects.
+        :param meta: Optional metadata to attach to the Documents.
+          This value can be either a list of dictionaries or a single dictionary.
+          If it's a single dictionary, its content is added to the metadata of all produced Documents.
+          If it's a list, the length of the list must match the number of sources, because the two lists will be zipped.
+          Defaults to `None`.
         :return: A dictionary containing a list of Document objects under the 'documents' key.
         """
         documents = []
-        for source in sources:
+        meta_list = normalize_metadata(meta, sources_count=len(sources))
+
+        for source, metadata in zip(sources, meta_list):
             try:
-                pdf_reader = self._get_pdf_reader(source)
+                bytestream = get_bytestream_from_source(source)
+            except Exception as e:
+                logger.warning("Could not read %s. Skipping it. Error: %s", source, e)
+                continue
+            try:
+                pdf_reader = PdfReader(io.BytesIO(bytestream.data))
                 document = self._converter.convert(pdf_reader)
             except Exception as e:
                 logger.warning("Could not read %s and convert it to Document, skipping. %s", source, e)
                 continue
+
+            merged_metadata = {**bytestream.meta, **metadata}
+            document.meta = merged_metadata
             documents.append(document)
 
         return {"documents": documents}
-
-    def _get_pdf_reader(self, source: Union[str, Path, ByteStream]) -> "PdfReader":
-        """
-        Creates a PdfReader object from a given source, which can be a file path or a ByteStream object.
-
-        :param source: The source of the PDF data.
-        :return: A PdfReader instance initialized with the PDF data from the source.
-        :raises ValueError: If the source type is not supported.
-        """
-        if isinstance(source, (str, Path)):
-            return PdfReader(str(source))
-        elif isinstance(source, ByteStream):
-            return PdfReader(io.BytesIO(source.data))
-        else:
-            raise ValueError(f"Unsupported source type: {type(source)}")

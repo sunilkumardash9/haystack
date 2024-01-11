@@ -1,8 +1,8 @@
 import json
 
 from haystack import Pipeline, Document
-from haystack.document_stores import InMemoryDocumentStore
-from haystack.components.retrievers import InMemoryBM25Retriever
+from haystack.document_stores.in_memory import InMemoryDocumentStore
+from haystack.components.retrievers.in_memory import InMemoryBM25Retriever
 from haystack.components.readers import ExtractiveReader
 
 
@@ -51,17 +51,20 @@ def test_extractive_qa_pipeline(tmp_path):
         # no_answer
         assert extracted_answers[-1].data is None
 
-        # since these questions are easily answerable, the best answer should have higher probability than no_answer
-        assert extracted_answers[0].probability >= extracted_answers[-1].probability
+        # since these questions are easily answerable, the best answer should have higher score than no_answer
+        assert extracted_answers[0].score >= extracted_answers[-1].score
 
         for answer in extracted_answers:
             assert answer.query == question
 
-            assert hasattr(answer, "probability")
-            assert hasattr(answer, "start")
-            assert hasattr(answer, "end")
+            assert hasattr(answer, "score")
+            assert hasattr(answer, "document_offset")
 
             assert hasattr(answer, "document")
-            # the answer is extracted from the correct document
-            if answer.document is not None:
-                assert answer.document.id == doc.id
+
+        # the top answer is extracted from the correct document
+        top_answer = extracted_answers[0]
+        if top_answer.document is not None:
+            if top_answer.document.id != doc.id:
+                print(top_answer.document.id, doc.id)
+            assert top_answer.document.id == doc.id

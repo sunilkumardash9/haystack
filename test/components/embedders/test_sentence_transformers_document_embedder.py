@@ -7,7 +7,6 @@ from haystack.components.embedders.sentence_transformers_document_embedder impor
 
 
 class TestSentenceTransformersDocumentEmbedder:
-    @pytest.mark.unit
     def test_init_default(self):
         embedder = SentenceTransformersDocumentEmbedder(model_name_or_path="model")
         assert embedder.model_name_or_path == "model"
@@ -18,10 +17,9 @@ class TestSentenceTransformersDocumentEmbedder:
         assert embedder.batch_size == 32
         assert embedder.progress_bar is True
         assert embedder.normalize_embeddings is False
-        assert embedder.metadata_fields_to_embed == []
+        assert embedder.meta_fields_to_embed == []
         assert embedder.embedding_separator == "\n"
 
-    @pytest.mark.unit
     def test_init_with_parameters(self):
         embedder = SentenceTransformersDocumentEmbedder(
             model_name_or_path="model",
@@ -32,7 +30,7 @@ class TestSentenceTransformersDocumentEmbedder:
             batch_size=64,
             progress_bar=False,
             normalize_embeddings=True,
-            metadata_fields_to_embed=["test_field"],
+            meta_fields_to_embed=["test_field"],
             embedding_separator=" | ",
         )
         assert embedder.model_name_or_path == "model"
@@ -43,10 +41,9 @@ class TestSentenceTransformersDocumentEmbedder:
         assert embedder.batch_size == 64
         assert embedder.progress_bar is False
         assert embedder.normalize_embeddings is True
-        assert embedder.metadata_fields_to_embed == ["test_field"]
+        assert embedder.meta_fields_to_embed == ["test_field"]
         assert embedder.embedding_separator == " | "
 
-    @pytest.mark.unit
     def test_to_dict(self):
         component = SentenceTransformersDocumentEmbedder(model_name_or_path="model")
         data = component.to_dict()
@@ -62,11 +59,10 @@ class TestSentenceTransformersDocumentEmbedder:
                 "progress_bar": True,
                 "normalize_embeddings": False,
                 "embedding_separator": "\n",
-                "metadata_fields_to_embed": [],
+                "meta_fields_to_embed": [],
             },
         }
 
-    @pytest.mark.unit
     def test_to_dict_with_custom_init_parameters(self):
         component = SentenceTransformersDocumentEmbedder(
             model_name_or_path="model",
@@ -77,7 +73,7 @@ class TestSentenceTransformersDocumentEmbedder:
             batch_size=64,
             progress_bar=False,
             normalize_embeddings=True,
-            metadata_fields_to_embed=["meta_field"],
+            meta_fields_to_embed=["meta_field"],
             embedding_separator=" - ",
         )
         data = component.to_dict()
@@ -94,11 +90,10 @@ class TestSentenceTransformersDocumentEmbedder:
                 "progress_bar": False,
                 "normalize_embeddings": True,
                 "embedding_separator": " - ",
-                "metadata_fields_to_embed": ["meta_field"],
+                "meta_fields_to_embed": ["meta_field"],
             },
         }
 
-    @pytest.mark.unit
     @patch(
         "haystack.components.embedders.sentence_transformers_document_embedder._SentenceTransformersEmbeddingBackendFactory"
     )
@@ -110,7 +105,6 @@ class TestSentenceTransformersDocumentEmbedder:
             model_name_or_path="model", device="cpu", use_auth_token=None
         )
 
-    @pytest.mark.unit
     @patch(
         "haystack.components.embedders.sentence_transformers_document_embedder._SentenceTransformersEmbeddingBackendFactory"
     )
@@ -121,7 +115,6 @@ class TestSentenceTransformersDocumentEmbedder:
         embedder.warm_up()
         mocked_factory.get_embedding_backend.assert_called_once()
 
-    @pytest.mark.unit
     def test_run(self):
         embedder = SentenceTransformersDocumentEmbedder(model_name_or_path="model")
         embedder.embedding_backend = MagicMock()
@@ -138,7 +131,6 @@ class TestSentenceTransformersDocumentEmbedder:
             assert isinstance(doc.embedding, list)
             assert isinstance(doc.embedding[0], float)
 
-    @pytest.mark.unit
     def test_run_wrong_input_format(self):
         embedder = SentenceTransformersDocumentEmbedder(model_name_or_path="model")
 
@@ -155,10 +147,9 @@ class TestSentenceTransformersDocumentEmbedder:
         ):
             embedder.run(documents=list_integers_input)
 
-    @pytest.mark.unit
     def test_embed_metadata(self):
         embedder = SentenceTransformersDocumentEmbedder(
-            model_name_or_path="model", metadata_fields_to_embed=["meta_field"], embedding_separator="\n"
+            model_name_or_path="model", meta_fields_to_embed=["meta_field"], embedding_separator="\n"
         )
         embedder.embedding_backend = MagicMock()
 
@@ -179,13 +170,12 @@ class TestSentenceTransformersDocumentEmbedder:
             normalize_embeddings=False,
         )
 
-    @pytest.mark.unit
     def test_prefix_suffix(self):
         embedder = SentenceTransformersDocumentEmbedder(
             model_name_or_path="model",
             prefix="my_prefix ",
             suffix=" my_suffix",
-            metadata_fields_to_embed=["meta_field"],
+            meta_fields_to_embed=["meta_field"],
             embedding_separator="\n",
         )
         embedder.embedding_backend = MagicMock()

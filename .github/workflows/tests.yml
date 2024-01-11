@@ -1,3 +1,4 @@
+# If you change this name also do it in tests_skipper.yml and ci_metrics.yml
 name: Tests
 
 on:
@@ -16,12 +17,15 @@ on:
     paths:
       - "haystack/**/*.py"
       - "test/**/*.py"
+      - "test/test_requirements.txt"
+      - "!haystack/core/**/*.py"
 
 env:
   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-  COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
   CORE_AZURE_CS_ENDPOINT: ${{ secrets.CORE_AZURE_CS_ENDPOINT }}
   CORE_AZURE_CS_API_KEY: ${{ secrets.CORE_AZURE_CS_API_KEY }}
+  AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+  AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
   PYTHON_VERSION: "3.8"
 
 jobs:
@@ -30,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -43,25 +47,6 @@ jobs:
         run: |
           if ! black . --check; then
             git status
-            echo "###################################################################################################"
-            echo "# "
-            echo "# CHECK FAILED! Black found issues with your code formatting."
-            echo "# "
-            echo "# Either:"
-            echo "# 1. Run Black locally before committing:"
-            echo "# "
-            echo "#     pip install .[formatting]"
-            echo "#     black ."
-            echo "# "
-            echo "# 2. Install the pre-commit hook:"
-            echo "# "
-            echo "#     pre-commit install"
-            echo "# "
-            echo "# 3. See https://github.com/deepset-ai/haystack/blob/main/CONTRIBUTING.md for help."
-            echo "# "
-            echo "# If you have further problems, please open an issue: https://github.com/deepset-ai/haystack/issues"
-            echo "# "
-            echo "##################################################################################################"
             exit 1
           fi
 
@@ -96,9 +81,32 @@ jobs:
                 - "branch:${{ github.ref_name }}"
                 - "url:https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
+  install-dependencies:
+    name: Install and cache ${{ matrix.os }} dependencies
+    needs: black
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Haystack and the dependencies needed for tests
+        run: pip install -r test/test_requirements.txt
+
+      - uses: actions/cache@v3
+        with:
+          path: ${{ env.pythonLocation }}
+          key: pip-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+
   unit-tests:
     name: Unit / ${{ matrix.os }}
-    needs: black
+    needs: install-dependencies
     strategy:
       fail-fast: false
       matrix:
@@ -110,15 +118,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install Haystack
-        run: pip install .[dev,audio] langdetect transformers[torch,sentencepiece]==4.35.2 'sentence-transformers>=2.2.0' pypdf markdown-it-py mdit_plain tika 'azure-ai-formrecognizer>=3.2.0b2' cohere boilerpy3
+      - name: Restore Python dependencies
+        uses: actions/cache/restore@v3
+        with:
+          path: ${{ env.pythonLocation }}
+          key: pip-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Run
-        run: pytest -m "not integration" test
+        run: pytest --cov-report xml:coverage.xml --cov="haystack" -m "not integration" test
+
+      - name: Coveralls
+        # We upload only coverage for ubuntu as handling both os
+        # complicates the workflow too much for little to no gain
+        if: matrix.os == 'ubuntu-latest'
+        uses: coverallsapp/github-action@v2
+        with:
+          path-to-lcov: coverage.xml
 
       - name: Calculate alert data
         id: calculator
@@ -163,7 +182,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -172,8 +191,11 @@ jobs:
           sudo apt update
           sudo apt install ffmpeg  # for local Whisper tests
 
-      - name: Install Haystack
-        run: pip install .[dev,audio] langdetect transformers[torch,sentencepiece]==4.35.2 'sentence-transformers>=2.2.0' pypdf markdown-it-py mdit_plain tika 'azure-ai-formrecognizer>=3.2.0b2' cohere boilerpy3
+      - name: Restore Python dependencies
+        uses: actions/cache/restore@v3
+        with:
+          path: ${{ env.pythonLocation }}
+          key: pip-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Run
         run: pytest --maxfail=5 -m "integration" test
@@ -212,30 +234,29 @@ jobs:
   integration-tests-macos:
     name: Integration / macos-latest
     needs: unit-tests
-    runs-on: macos-latest-xl
+    runs-on: macos-latest
     env:
       HAYSTACK_MPS_ENABLED: false
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
         run: |
           brew install ffmpeg  # for local Whisper tests
-          brew install docker
-          colima start
 
-      - name: Install Haystack
-        run: pip install .[dev,audio] langdetect transformers[torch,sentencepiece]==4.35.2 'sentence-transformers>=2.2.0' pypdf markdown-it-py mdit_plain tika 'azure-ai-formrecognizer>=3.2.0b2' cohere boilerpy3
-
-      - name: Run Tika
-        run: docker run -d -p 9998:9998 apache/tika:2.9.0.0
+      - name: Restore Python dependencies
+        uses: actions/cache/restore@v3
+        with:
+          path: ${{ env.pythonLocation }}
+          key: pip-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Run
-        run: pytest --maxfail=5 -m "integration" test
+        run: pytest --maxfail=5 -m "integration" test -k 'not tika'
 
       - name: Calculate alert data
         id: calculator
@@ -275,12 +296,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install Haystack
-        run: pip install .[dev,audio] langdetect transformers[torch,sentencepiece]==4.35.2 'sentence-transformers>=2.2.0' pypdf markdown-it-py mdit_plain tika 'azure-ai-formrecognizer>=3.2.0b2' cohere boilerpy3
+      - name: Restore Python dependencies
+        uses: actions/cache/restore@v3
+        with:
+          path: ${{ env.pythonLocation }}
+          key: pip-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Run
         run: pytest --maxfail=5 -m "integration" test -k 'not tika'
@@ -315,3 +339,18 @@ jobs:
                 - "workflow:${{ github.workflow }}"
                 - "branch:${{ github.ref_name }}"
                 - "url:https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+  catch-all:
+    name: Catch-all check
+    runs-on: ubuntu-latest
+    # This job will be executed only after all the other tests
+    # are successful.
+    # This way we'll be able to mark only this test as required
+    # and skip it accordingly.
+    needs:
+      - integration-tests-linux
+      - integration-tests-macos
+      - integration-tests-windows
+    steps:
+      - name: Finisher
+        run: echo "Finish him!"
